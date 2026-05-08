@@ -552,6 +552,7 @@ impl RendezvousServer {
      * Gets the list of currently claimed nameplates.
      * This can be called at any time.
      */
+    #[allow(dead_code)]
     pub async fn list_nameplates(&mut self) -> Result<Vec<Nameplate>, RendezvousError> {
         self.send_message(&OutboundMessage::List).await?;
         let nameplate_reply = self.receive_reply().await?;

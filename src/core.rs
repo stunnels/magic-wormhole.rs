@@ -196,7 +196,7 @@ impl<V: serde::Serialize + Send + Sync + 'static> MailboxConnection<V> {
     pub async fn connect(
         config: AppConfig<V>,
         code: Code,
-        allocate: bool,
+        _allocate: bool,
     ) -> Result<Self, WormholeError> {
         let (mut server, welcome) =
             RendezvousServer::connect(&config.id, &config.rendezvous_url).await?;
@@ -204,13 +204,14 @@ impl<V: serde::Serialize + Send + Sync + 'static> MailboxConnection<V> {
 
         // Ensure the code has enough entropy without the nameplate [#193](https://github.com/magic-wormhole/magic-wormhole.rs/issues/193)
 
-        if !allocate {
-            let nameplates = server.list_nameplates().await?;
-            if !nameplates.contains(&nameplate) {
-                server.shutdown(Mood::Errory).await?;
-                return Err(WormholeError::UnclaimedNameplate(nameplate));
-            }
-        }
+        // // XXX This code used server.list_nameplates, which is not necessarily exposed by the mailbox server.
+        // if !allocate {
+        //     let nameplates = server.list_nameplates().await?;
+        //     if !nameplates.contains(&nameplate) {
+        //         server.shutdown(Mood::Errory).await?;
+        //         return Err(WormholeError::UnclaimedNameplate(nameplate));
+        //     }
+        // }
         let mailbox = server.claim_open(nameplate).await?;
 
         Ok(MailboxConnection {
@@ -420,9 +421,14 @@ impl Wormhole {
 
     /// Close the wormhole
     pub async fn close(self) -> Result<(), WormholeError> {
-        tracing::debug!("Closing Wormhole…");
-        self.server.shutdown(Mood::Happy).await.map_err(Into::into)
+        self.shutdown(Mood::Happy).await.map_err(Into::into)
     }
+
+    /// Close the wormhole with a mood
+    pub async fn shutdown(self, mood: Mood) -> Result<(), WormholeError> {
+        tracing::debug!("Shutting down Wormhole with mood {}…", mood);
+        self.server.shutdown(mood).await.map_err(Into::into)
+    } 
 
     /**
      * The `AppID` this wormhole is bound to.
@@ -509,7 +515,7 @@ pub enum Mood {
  *
  * See [`crate::transfer::APP_CONFIG`].
  */
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Clone, Debug)]
 pub struct AppConfig<V> {
     /// The ID of the used application
     pub id: AppID,

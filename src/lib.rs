@@ -34,6 +34,8 @@ pub mod forwarding;
 pub mod transfer;
 #[cfg(feature = "transit")]
 pub mod transit;
+#[cfg(feature = "trickle")]
+pub mod trickle;
 #[cfg(feature = "transfer")]
 pub mod uri;
 
