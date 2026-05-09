@@ -7,6 +7,12 @@ use async_tungstenite::tungstenite as ws2;
 use futures::prelude::*;
 use std::collections::VecDeque;
 
+#[cfg(target_family = "wasm")]
+use std::{cell::RefCell, rc::Rc};
+
+#[cfg(target_family = "wasm")]
+use wasm_bindgen::{JsCast, closure::Closure};
+
 use crate::core::{
     AppID, EncryptedMessage, Mailbox, Mood, MySide, Nameplate, Phase,
     server_messages::{InboundMessage, OutboundMessage, PermissionRequired, SubmitPermission},
@@ -90,15 +96,64 @@ struct NameplateList(Vec<Nameplate>);
 #[cfg(not(target_family = "wasm"))]
 struct WsConnection {
     connection: async_tungstenite::WebSocketStream<async_tungstenite::smol::ConnectStream>,
+    on_peer_message: Option<Box<dyn FnMut(&EncryptedMessage)>>,
 }
 
 #[cfg(target_family = "wasm")]
 struct WsConnection {
     connection: ws_stream_wasm::WsStream,
     meta: ws_stream_wasm::WsMeta,
+    on_peer_message: Rc<RefCell<Option<Box<dyn FnMut(&EncryptedMessage)>>>>,
+    on_peer_message_listener: Option<Closure<dyn FnMut(web_sys::MessageEvent)>>,
 }
 
 impl WsConnection {
+    #[cfg(not(target_family = "wasm"))]
+    fn set_on_peer_message<F>(&mut self, callback: F)
+    where
+        F: FnMut(&EncryptedMessage) + 'static,
+    {
+        self.on_peer_message = Some(Box::new(callback));
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn set_on_peer_message<F>(&mut self, callback: F)
+    where
+        F: FnMut(&EncryptedMessage) + 'static,
+    {
+        self.on_peer_message
+            .borrow_mut()
+            .replace(Box::new(callback));
+
+        if self.on_peer_message_listener.is_some() {
+            return;
+        }
+
+        let callback_slot = Rc::clone(&self.on_peer_message);
+        let listener = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
+            let Some(message_plain) = event.data().as_string() else {
+                return;
+            };
+
+            let Ok(message) = serde_json::from_str::<InboundMessage>(&message_plain) else {
+                return;
+            };
+
+            if let InboundMessage::Message(peer_message) = message {
+                if let Some(callback) = callback_slot.borrow_mut().as_mut() {
+                    callback(&peer_message);
+                }
+            }
+        }) as Box<dyn FnMut(_)>);
+
+        let _ = self
+            .meta
+            .wrapped()
+            .add_event_listener_with_callback("message", listener.as_ref().unchecked_ref());
+
+        self.on_peer_message_listener = Some(listener);
+    }
+
     #[cfg(not(target_family = "wasm"))]
     async fn send_message(
         &mut self,
@@ -218,6 +273,11 @@ impl WsConnection {
             ws2::Message::Text(message_plain) => {
                 let message = serde_json::from_str(&message_plain)?;
                 tracing::debug!("Received {}", message);
+                if let InboundMessage::Message(ref peer_message) = message {
+                    if let Some(callback) = self.on_peer_message.as_mut() {
+                        callback(peer_message);
+                    }
+                }
                 match message {
                     InboundMessage::Unknown => {
                         tracing::warn!("Got unknown message, ignoring: '{}'", message_plain);
@@ -355,7 +415,10 @@ impl RendezvousServer {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let (stream, _) = async_tungstenite::smol::connect_async(relay_url).await?;
-            connection = WsConnection { connection: stream };
+            connection = WsConnection {
+                connection: stream,
+                on_peer_message: None,
+            };
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -364,6 +427,8 @@ impl RendezvousServer {
             connection = WsConnection {
                 meta,
                 connection: stream,
+                on_peer_message: Rc::new(RefCell::new(None)),
+                on_peer_message_listener: None,
             };
         }
 
@@ -421,6 +486,19 @@ impl RendezvousServer {
     /** A random unique string for this session */
     pub(crate) fn side(&self) -> &MySide {
         &self.side
+    }
+
+    pub(crate) fn on_peer_message<F>(&mut self, callback: F)
+    where
+        F: FnMut(&EncryptedMessage) + 'static,
+    {
+        let mut callback = callback;
+        let side = self.side.clone();
+        self.connection.set_on_peer_message(move |message| {
+            if *message.side != *side {
+                callback(message);
+            }
+        });
     }
 
     async fn send_message(&mut self, message: &OutboundMessage) -> Result<(), RendezvousError> {

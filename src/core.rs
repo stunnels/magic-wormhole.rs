@@ -399,6 +399,24 @@ impl Wormhole {
     }
 
     /**
+     * Register a callback for push-style incoming peer messages.
+     *
+     * The callback is invoked from the rendezvous websocket ingress path
+     * whenever a peer `message` frame is received.
+     */
+    pub fn on_message<F>(&mut self, mut callback: F)
+    where
+        F: FnMut(Result<Vec<u8>, WormholeError>) + 'static,
+    {
+        let key = <key::Key<key::WormholeKey> as AsRef<secretbox::Key>>::as_ref(&self.key)
+            .clone();
+        self.server.on_peer_message(move |message| {
+            let result = message.decrypt(&key).ok_or(WormholeError::Crypto);
+            callback(result);
+        });
+    }
+
+    /**
      * Receive an encrypted message from peer
      *
      * This will deserialize the message as `json` string, which is most commonly
